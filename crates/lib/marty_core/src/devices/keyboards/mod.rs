@@ -33,3 +33,4 @@
 pub mod model_f;
 pub mod pcjr;
 pub mod tandy1000;
+pub mod gts220;

@@ -41,6 +41,8 @@ pub mod cga;
 pub mod conventional_memory;
 pub mod dipswitch;
 pub mod dma;
+pub mod gts220;
+pub mod gts_modem;
 #[cfg(feature = "ega")]
 pub mod ega;
 pub mod fantasy_ems;

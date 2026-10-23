@@ -1,0 +1,68 @@
+# romdef_gts220.toml
+# ROM definition for the Korea Telecom HITEL-II GTS-220 terminal.
+#
+# The GTS-220's 256KB main firmware (TMS27C020) replaces the entire PC BIOS
+# area: it contains the boot/POST code, mini-DOS, serial/video/FS drivers,
+# and the Korean terminal application. It claims the 'ibm5160' feature
+# because it is the only system ROM the machine needs (there is no separate
+# PC BIOS beneath it).
+#
+# Boot checkpoints are RE-verified markers from GTS-220/docs/ADDRESSMAP.md;
+# they appear in the MartyPC status line / trace output during boot.
+
+[[romset]]
+alias = "gts220_main"
+desc = "GTS-220 main firmware 1.2.4 (TMS27C020 256KB)"
+priority = 1
+provides = ["ibm5160", "gts220"]
+oem = true
+rom = [
+    { md5 = "100dce26ae0bbf9a747b1fa394b68227", addr = 0xC0000, size = 262144, chip = "main" }
+]
+checkpoint = [
+    { addr = 0xC0000, lvl = 0, desc = "BOOT start (reset vector)" },
+    { addr = 0xC00E9, lvl = 0, desc = "RAM test PASSED (128KB verified)" },
+    { addr = 0xF756C, lvl = 0, desc = "C startup thunk (mini-DOS install)" },
+    { addr = 0xC83A2, lvl = 0, desc = "application main entry" },
+    { addr = 0xE3F40, lvl = 0, desc = "video_init (boot beep + VRAM=A000)" },
+    { addr = 0xC95C0, lvl = 0, desc = "application buffer allocation" },
+    { addr = 0xC9B42, lvl = 0, desc = "app init: serial ch0(ch1) setup, STI" },
+    { addr = 0xEE92A, lvl = 0, desc = "serial_channel_open (modem ch0, 2400bps)" },
+    { addr = 0xEE998, lvl = 0, desc = "serial_channel_open (data ch1, 9600bps)" },
+    { addr = 0xC9BA4, lvl = 0, desc = "first delay(500ms)" },
+    { addr = 0xC4524, lvl = 0, desc = "BOOT LOGO DRAW" },
+    { addr = 0xC6374, lvl = 0, desc = "modem boot init (RI check)" },
+    { addr = 0xC8576, lvl = 0, desc = "STATE-0: main screen handler (BOOT COMPLETE)" },
+    # TEMP scroll-path checkpoints (2026-10-19 investigation)
+
+    # Keypad-mode flag fix: the editor-exit path calls the state-reset function
+    # (e000:ba5a) which clears the keypad-mode flag at 0060:0FB0, forcing the
+    # key translator (d000:0742) back to cursor-mode codes that the Ctrl-6
+    # editor's dispatcher does not accept. NOP the flag write (6 bytes) so a
+    # flag=1 set in the debugger (memory viewer @ phys 0x015B0) persists
+    # across editor exits. Analysis: 2026-10-20 keypad-mode session.
+]
+
+[[romset.patch]]
+desc = "editor: keep keypad-mode flag (0060:0FB0) across editor exit"
+trigger = 0xC8576
+addr = 0xEBA8D
+bytes = [0x90, 0x90, 0x90, 0x90, 0x90, 0x90]
+
+# Always-DOS-mode patch: the key translator (d000:0742) branches on the
+# keypad-mode flag (0060:0FB0): flag==0 -> internal-code arrows (Up=0x0938),
+# flag!=0 -> DOS-style extended codes (Up=0x4800, Down=0x5000, Home=0x4700).
+# NOP the 'je' at d000:0804 (74 1E) so BOTH paths fall through to the
+# flag!=0 branch: the flag becomes irrelevant and every boot starts in
+# DOS mode without a debugger flag write. Verified in emu/
+# validate_dosmode_patch.py: flag=0 + patch gives 0x5000/0x4800/0x4f00 and
+# plain ASCII keys are unchanged ('a' -> 0x1e61). The flag has exactly one
+# consumer (this cmp; toggles at e000:9326 / e000:ba8e are writes only).
+# Trigger 0xC857B is the instruction right after the existing 0xC8576
+# checkpoint (patch_map is one patch per address, so a distinct trigger
+# address is required), same boot-completion block.
+[[romset.patch]]
+desc = "keyboard: force DOS-mode keypad translation always (ignore 0060:0FB0 flag)"
+trigger = 0xC857B
+addr = 0xD0804
+bytes = [0x90, 0x90]

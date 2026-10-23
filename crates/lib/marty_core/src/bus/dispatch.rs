@@ -147,6 +147,7 @@ impl VideoCardDispatch {
             VideoCardDispatch::Ega(ega) => IoDevice::read_u8(&mut **ega, port, delta),
             #[cfg(feature = "vga")]
             VideoCardDispatch::Vga(vga) => IoDevice::read_u8(&mut **vga, port, delta),
+            VideoCardDispatch::Gts220(c) => IoDevice::read_u8(&mut **c, port, delta),
         }
     }
 
@@ -167,6 +168,9 @@ impl VideoCardDispatch {
             VideoCardDispatch::Ega(ega) => IoDevice::write_u8(&mut **ega, port, data, bus, delta, analyzer),
             #[cfg(feature = "vga")]
             VideoCardDispatch::Vga(vga) => IoDevice::write_u8(&mut **vga, port, data, bus, delta, analyzer),
+            VideoCardDispatch::Gts220(c) => {
+                IoDevice::write_u8(&mut **c, port, data, bus, delta, analyzer)
+            }
         }
     }
 
@@ -180,6 +184,7 @@ impl VideoCardDispatch {
             VideoCardDispatch::Ega(ega) => MemoryMappedDevice::mmio_peek_u8(&**ega, address, cpumem),
             #[cfg(feature = "vga")]
             VideoCardDispatch::Vga(vga) => MemoryMappedDevice::mmio_peek_u8(&**vga, address, cpumem),
+            VideoCardDispatch::Gts220(c) => MemoryMappedDevice::mmio_peek_u8(&**c, address, cpumem),
         }
     }
 
@@ -193,6 +198,7 @@ impl VideoCardDispatch {
             VideoCardDispatch::Ega(ega) => ega.get_read_wait(address, system_ticks),
             #[cfg(feature = "vga")]
             VideoCardDispatch::Vga(vga) => vga.get_read_wait(address, system_ticks),
+            VideoCardDispatch::Gts220(c) => c.get_read_wait(address, system_ticks),
         }
     }
 
@@ -206,6 +212,7 @@ impl VideoCardDispatch {
             VideoCardDispatch::Ega(ega) => ega.get_write_wait(address, system_ticks),
             #[cfg(feature = "vga")]
             VideoCardDispatch::Vga(vga) => vga.get_write_wait(address, system_ticks),
+            VideoCardDispatch::Gts220(c) => c.get_write_wait(address, system_ticks),
         }
     }
 
@@ -219,6 +226,7 @@ impl VideoCardDispatch {
             VideoCardDispatch::Ega(ega) => MemoryMappedDevice::mmio_read_u8(&mut **ega, address, ticks, cpumem),
             #[cfg(feature = "vga")]
             VideoCardDispatch::Vga(vga) => MemoryMappedDevice::mmio_read_u8(&mut **vga, address, ticks, cpumem),
+            VideoCardDispatch::Gts220(c) => MemoryMappedDevice::mmio_read_u8(&mut **c, address, ticks, cpumem),
         }
     }
 
@@ -232,6 +240,7 @@ impl VideoCardDispatch {
             VideoCardDispatch::Ega(ega) => MemoryMappedDevice::mmio_read_u16(&mut **ega, address, ticks, cpumem),
             #[cfg(feature = "vga")]
             VideoCardDispatch::Vga(vga) => MemoryMappedDevice::mmio_read_u16(&mut **vga, address, ticks, cpumem),
+            VideoCardDispatch::Gts220(c) => MemoryMappedDevice::mmio_read_u16(&mut **c, address, ticks, cpumem),
         }
     }
 
@@ -245,6 +254,7 @@ impl VideoCardDispatch {
             VideoCardDispatch::Ega(ega) => MemoryMappedDevice::mmio_write_u8(&mut **ega, address, data, ticks, cpumem),
             #[cfg(feature = "vga")]
             VideoCardDispatch::Vga(vga) => MemoryMappedDevice::mmio_write_u8(&mut **vga, address, data, ticks, cpumem),
+            VideoCardDispatch::Gts220(c) => MemoryMappedDevice::mmio_write_u8(&mut **c, address, data, ticks, cpumem),
         }
     }
 
@@ -258,6 +268,7 @@ impl VideoCardDispatch {
             VideoCardDispatch::Ega(ega) => MemoryMappedDevice::mmio_write_u16(&mut **ega, address, data, ticks, cpumem),
             #[cfg(feature = "vga")]
             VideoCardDispatch::Vga(vga) => MemoryMappedDevice::mmio_write_u16(&mut **vga, address, data, ticks, cpumem),
+            VideoCardDispatch::Gts220(c) => MemoryMappedDevice::mmio_write_u16(&mut **c, address, data, ticks, cpumem),
         }
     }
 }

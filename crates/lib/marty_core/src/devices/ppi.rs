@@ -496,6 +496,7 @@ impl Ppi {
             port_c_mode: match machine_type {
                 MachineType::Ibm5150v64K | MachineType::Ibm5150v256K => PortCMode::Switch2OneToFour,
                 MachineType::Ibm5160 => PortCMode::Switch1FiveToEight,
+                MachineType::Gts220 => PortCMode::Switch1FiveToEight,
                 MachineType::Tandy1000 | MachineType::Tandy1000SL | MachineType::Tandy1000HX => {
                     PortCMode::Switch1FiveToEight
                 }
@@ -530,6 +531,10 @@ impl Ppi {
 
                     !dip_sw1
                 }
+                // GTS-220: no configuration DIP switches on the 8255 (RE:
+                // port 0x63 mode 0x99, A input / B output; no switch block
+                // observed in the firmware's port reads).
+                MachineType::Gts220 => 0,
                 _ => {
                     log::error!("Machine type: {:?} has no PPI", machine_type);
                     0
@@ -777,7 +782,8 @@ impl Ppi {
             | MachineType::CompaqDeskpro
             | MachineType::Tandy1000
             | MachineType::Tandy1000SL
-            | MachineType::Tandy1000HX => {
+            | MachineType::Tandy1000HX
+            | MachineType::Gts220 => {
                 // On most XT-compatible systems, this bit clears the keyboard and suppresses IRQ1.
                 if byte & PORTB_KB_CLEAR != 0 {
                     self.keyboard_clear_scheduled = true;
@@ -837,7 +843,8 @@ impl Ppi {
                     self.kb_byte.update(byte);
                 }
             }
-            MachineType::Ibm5150v64K | MachineType::Ibm5150v256K | MachineType::Ibm5160 => {
+            MachineType::Ibm5150v64K | MachineType::Ibm5150v256K | MachineType::Ibm5160
+            | MachineType::Gts220 => {
                 // Only send a scancode if the keyboard is not actively being reset.
                 if self.kb_enabled() && self.ksr_cleared {
                     self.ksr_cleared = false;

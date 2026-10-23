@@ -32,9 +32,7 @@
 use std::str::FromStr;
 
 use crate::{
-    device_traits::keyboard::MartyKeyboard,
-    devices::keyboards::{model_f::ModelF, pcjr::PcJrKeyboard, tandy1000::Tandy1000Keyboard},
-    keys::MartyKey,
+    device_traits::keyboard::MartyKeyboard, devices::keyboards::{model_f::ModelF, pcjr::PcJrKeyboard, tandy1000::Tandy1000Keyboard, gts220::Gts220Keyboard}, keys::MartyKey,
 };
 
 use serde_derive::Deserialize;
@@ -46,6 +44,7 @@ pub enum KeyboardType {
     ModelM,
     Tandy1000,
     Pcjr,
+    Gts220,
 }
 
 impl KeyboardType {
@@ -54,6 +53,7 @@ impl KeyboardType {
             KeyboardType::ModelF => ModelF::keycode_to_scancodes(key_code),
             KeyboardType::Tandy1000 => Tandy1000Keyboard::keycode_to_scancodes(key_code),
             KeyboardType::Pcjr => PcJrKeyboard::keycode_to_scancodes(key_code),
+            KeyboardType::Gts220 => Gts220Keyboard::keycode_to_scancodes(key_code),
             _ => unimplemented!(),
         }
     }
@@ -70,6 +70,7 @@ impl FromStr for KeyboardType {
             "ModelM" => Ok(KeyboardType::ModelM),
             "Tandy1000" => Ok(KeyboardType::Tandy1000),
             "PCjr" => Ok(KeyboardType::Pcjr),
+            "Gts220" => Ok(KeyboardType::Gts220),
             _ => Err("Bad value for keyboard_type".to_string()),
         }
     }

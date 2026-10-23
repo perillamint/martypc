@@ -1,0 +1,85 @@
+# gts220.toml
+# Machine configuration for the Korea Telecom HITEL-II GTS-220 terminal.
+#
+# Reverse-engineering docs: GTS-220/docs/ADDRESSMAP.md (workspace root).
+#
+# Architecture summary:
+#   - CPU: UMC82C088 (8088), XT-class core: 8259 PIC (AEOI), 8253 PIT,
+#     8237 DMA ch0 = DRAM refresh. 128KB verified system RAM.
+#   - Video: custom fixed-mode board — 640x550 16-color planar @ 0xA0000,
+#     EGA-compatible latch drawing. No text mode (glyphs are drawn in
+#     software by the firmware from the external font ROM).
+#   - Font chip: KM23F4000 512KB mask ROM, linear bus window
+#     0x20000-0x9FFFF (chip = bus & 0x7FFFF).
+#   - File system: KM681000B 128KB battery-backed SRAM @ 0xB0000,
+#     64KB pages selected by port 0x3E2. 8.3-name mini-FS with 3-way
+#     checksum voting (canonical page 0, mirror page 1).
+#   - Serial: TL16C451 quad 16550 — COM1 0x3F8 (modem, 2400bps, IRQ4),
+#     COM2 0x2F8 (data port, 9600bps, IRQ3), COM3/COM4 in the table only.
+#   - Modem board: R65C19 + RC2324DPL on COM1. Emulated by a virtual
+#     Hayes-compatible modem; data calls bridge to a TCP endpoint.
+#   - No floppy controller, no hard disk controller, no RTC.
+#
+# NOTE: rom_path/font_rom resolve relative to the emulator working
+# directory (the martypc portable dir). The NVSRAM battery state is kept
+# in a '<rom_path>.nvs' sidecar next to the image.
+
+[[machine]]
+name = "gts220"
+type = "Gts220"
+rom_set = "gts220_main"
+speaker = true
+overlays = [
+]
+
+    [machine.memory]
+    conventional.size = 0xA0000
+    conventional.wait_states = 0
+
+    # Custom video board + NVSRAM + font chip windows.
+    [[machine.video]]
+    bus_type = "ISA"
+    type = "Gts220"
+    rom_path = "media/roms/gts220/nvsram.bin"
+    font_rom = "media/roms/gts220/font.rom"
+    # NVSRAM filesystem writable: REQUIRED for a valid SETUP$$$.DAT to load
+    # (the firmware rewrites it at boot; read-only stalls the chain walk).
+    # Writes persist to the '<rom_path>.nvs' battery sidecar.
+    fs_writable = true
+
+    [machine.keyboard]
+    type = "Gts220"
+    # Keyboard layout. Used to load the appropriate keyboard translation file. 
+    # MartyPC will look for the file keyboard_XX.toml in the ./keyboard/ directory
+    # where XX is the string specified by keyboard_layout.
+    #
+    # Certain scancodes have changed their meaning since the 1980's. Your help
+    # would be appreciated in developing new translation files.
+    layout = "US"
+    # Enable typematic repeat for the emulated keyboard. Host repeat is ignored.
+    typematic = true
+    # Delay in milliseconds before typematic repeat begins.
+    typematic_delay = 500.0
+    # Delay in milliseconds between each scancode during typematic repeat.
+    typematic_rate= 50.0
+
+    # TL16C451 ports 0/1 (ports 2/3 exist in the firmware table but are
+    # unused). COM1 carries the virtual modem for the R65C19 board.
+    #
+    # Dial addressing: a dial string containing '.' or ':' is a host —
+    # "ATDT192.168.1.10:2323" connects to that TCP endpoint directly (bare
+    # hosts default to port 23). Store the IP in the HITEL*.TEL phone book
+    # as the phone number and dial from the terminal UI. The 'host' below
+    # is the fallback endpoint for pure phone-number dials; remove the
+    # virtual_modem table (or its host) for NO CARRIER behavior.
+    [[machine.serial]]
+    bus_type = "ISA"
+    type = "IbmAsync"
+        [[machine.serial.port]]
+        io_base = 0x3F8
+        irq = 4
+            [machine.serial.port.virtual_modem]
+            host = "127.0.0.1:2323"
+        [[machine.serial.port]]
+        io_base = 0x2F8
+        irq = 3

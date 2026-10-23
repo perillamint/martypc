@@ -135,6 +135,16 @@ impl VideoRenderer {
                 self.params.aperture,
                 extents,
             ),
+            // GTS-220: the card composes its own RGBA framebuffer
+            // (640x550, EGA palette); the render path is a plain blit.
+            VideoType::Gts220 => VideoRenderer::draw_vga_direct_u32_rgba(
+                first_pass_buf,
+                self.params.render.w,
+                self.params.render.h,
+                input_buf,
+                self.params.aperture,
+                extents,
+            ),
         }
 
         // Sample light-pen luma whether or not its cursor is visible.

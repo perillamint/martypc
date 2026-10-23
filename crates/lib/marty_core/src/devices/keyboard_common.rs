@@ -34,7 +34,7 @@ use std::{collections::VecDeque, str::FromStr, vec::Vec};
 
 use crate::{
     device_types::keyboard::KeyboardType,
-    devices::keyboards::{model_f::ModelF, pcjr::PcJrKeyboard, tandy1000::Tandy1000Keyboard},
+    devices::keyboards::{model_f::ModelF, pcjr::PcJrKeyboard, tandy1000::Tandy1000Keyboard, gts220::Gts220Keyboard},
     keys::MartyKey,
     machine::KeybufferEntry,
 };
@@ -105,6 +105,7 @@ pub struct KeyboardDefinition {
     modelf: ModelF,
     tandy1000: Tandy1000Keyboard,
     pcjr: PcJrKeyboard,
+    gts220: Gts220Keyboard,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,6 +214,9 @@ impl Keyboard {
             }
             KeyboardType::Pcjr => {
                 self.keycode_mappings = toml_mapping.keyboard.pcjr.keycode_mappings;
+            }
+            KeyboardType::Gts220 => {
+                self.keycode_mappings = toml_mapping.keyboard.modelf.keycode_mappings;
             }
             _ => unimplemented!(),
         }
@@ -534,7 +538,7 @@ impl Keyboard {
     /// Convert a translated scancode sequence to its corresponding keyup sequence.
     fn translate_keyup(&self, kb_type: KeyboardType, translation: &mut [u8]) {
         match kb_type {
-            KeyboardType::ModelF | KeyboardType::Tandy1000 | KeyboardType::Pcjr => {
+            KeyboardType::ModelF | KeyboardType::Tandy1000 | KeyboardType::Pcjr | KeyboardType::Gts220 => {
                 // Translations should only have one keycode.
                 assert_eq!(translation.len(), 1);
 

@@ -195,6 +195,20 @@ pub struct VideoCardConfig {
     pub dip_switch: Option<u8>,
     #[serde(default = "_default_true")]
     pub monitor_emulation: bool,
+    /// GTS-220 only: path to the 512KB data-ROM/SRAM image used by the
+    /// B000:0000-DFFF paged window and the E000-FFFF persistent RAM init.
+    #[serde(default)]
+    pub rom_path: Option<String>,
+    /// GTS-220 only: path to the 512KB font mask ROM (KM23F4000). Mapped as
+    /// a linear bus window at 0x20000-0x9FFFF (chip = bus & 0x7FFFF).
+    #[serde(default)]
+    pub font_rom: Option<String>,
+    /// GTS-220 only: make the NVSRAM filesystem writable (default false —
+    /// the synthesized image was validated read-only). Required for the
+    /// firmware's SETUP$$$.DAT delete+recreate at boot to succeed; without
+    /// it a valid SETUP file stalls the boot in the mini-DOS chain walk.
+    #[serde(default)]
+    pub fs_writable: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -211,6 +225,21 @@ pub struct SerialPortConfig {
     pub irq: u32,
     #[serde(default = "_default_true")]
     pub out2_suppresses_int: bool,
+    /// Attach a virtual Hayes modem to this port (GTS-220 R65C19 board
+    /// stand-in). Optional fields select its behavior.
+    #[serde(default)]
+    pub virtual_modem: Option<VirtualModemConfig>,
+}
+
+/// GTS-220 virtual modem configuration.
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct VirtualModemConfig {
+    /// TCP endpoint for data calls ("host:port"). When the firmware dials,
+    /// the virtual modem connects here and bridges the data stream. Omit to
+    /// simulate a modem with no service reachable (dials fail with
+    /// NO CARRIER).
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -326,6 +355,7 @@ lazy_static! {
         m.insert(MachineType::Tandy1000HX, vec!["tandy1000hx"]);
         m.insert(MachineType::CompaqPortable, vec!["compaq_portable"]);
         m.insert(MachineType::CompaqDeskpro, vec!["compaq_deskpro"]);
+        m.insert(MachineType::Gts220, vec!["gts220"]);
         m
     };
 
@@ -342,6 +372,7 @@ lazy_static! {
         m.insert(MachineType::Tandy1000SL, vec![]);
         m.insert(MachineType::CompaqPortable, vec![]);
         m.insert(MachineType::CompaqDeskpro, vec![]);
+        m.insert(MachineType::Gts220, vec![]);
 
         // Add the "custom" optional feature to all Machine types.
         for machine_type in MachineType::iter() {
@@ -491,6 +522,44 @@ lazy_static! {
                     machine_type: MachineType::CompaqDeskpro,
                     cpu_type: CpuType::Intel8086,
                     ..Default::default()
+                },
+            ),
+            (
+                // Korea Telecom HITEL-II GTS-220 terminal.
+                // Clock architecture (RE 2026-10-15, board + UMC82C088/
+                // TACT80101 datasheet): HOSC = 30MHz oscillator feeds the
+                // northbridge, which generates the CPU clock as HOSC/3
+                // (1/3 duty cycle, 8284-style) = 10MHz for the AMD8088.
+                // The PIT input clock is not directly documented; the
+                // firmware programs counter 0 with 0xC26D (~24Hz tick at
+                // the XT-standard 1.193MHz), so we model PIT = HOSC/25 =
+                // 1.2MHz (tick 24.1Hz, +0.5% vs the firmware's design
+                // assumption).
+                MachineType::Gts220,
+                MachineDescriptor {
+                    machine_type: MachineType::Gts220,
+                    system_crystal: 30.0,
+                    timer_crystal: None,
+                    bus_crystal: 30.0,
+                    open_bus_byte: 0xFF,
+                    cpu_type: CpuType::Intel8088,
+                    cpu_factor: ClockFactor::Divisor(3),  // HOSC/3 = 10MHz
+                    cpu_turbo_factor: ClockFactor::Divisor(3), // no turbo
+                    bus_type: BusType::Isa8,
+                    bus_factor: ClockFactor::Divisor(1),
+                    timer_divisor: 25, // PIT = 30/25 = 1.2MHz
+                    have_ppi: true,
+                    a0: Some(A0Type::PCXT),
+                    kb_controller: KbControllerType::Ppi,
+                    pit_type: PitType::Model8253,
+                    pic_type: PicType::Single,
+                    dma_type: Some(DmaType::Single),
+                    onboard_sound: None,
+                    onboard_serial: None,
+                    onboard_parallel: None,
+                    allow_expansion_video: false,
+                    pcjr_cart_slot: false,
+                    game_port: None,
                 },
             ),
             (

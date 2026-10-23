@@ -88,6 +88,7 @@ pub enum VideoType {
     EGA,
     #[cfg(feature = "vga")]
     VGA,
+    Gts220,
 }
 
 impl FromStr for VideoType {
@@ -104,6 +105,7 @@ impl FromStr for VideoType {
             "EGA" => Ok(VideoType::EGA),
             #[cfg(feature = "vga")]
             "VGA" => Ok(VideoType::VGA),
+            "GTS220" => Ok(VideoType::Gts220),
             _ => Err("Bad value for videotype".to_string()),
         }
     }
@@ -160,6 +162,7 @@ pub enum VideoCardDispatch {
     Ega(Box<EGACard>),
     #[cfg(feature = "vga")]
     Vga(Box<VGACard>),
+    Gts220(Box<crate::devices::gts220::Gts220Card>),
 }
 
 // This struct provides an identifier for a VideoCard, encapsulating a unique numeric id ('idx')

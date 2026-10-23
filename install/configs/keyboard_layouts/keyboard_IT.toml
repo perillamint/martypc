@@ -281,3 +281,6 @@ keycode_mappings = []
 # should only have one element.
 [keyboard.pcjr]
 keycode_mappings = []
+
+[keyboard.gts220]
+keycode_mappings = []

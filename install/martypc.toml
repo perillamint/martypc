@@ -36,10 +36,11 @@ service_interrupt_gate = true
 # For other configuration names, see the configuration files in /config/machines/.
 
 # Only one `config_name` should be uncommented at a time.
-config_name = "ibm5160_xtide"
+#config_name = "ibm5160_xtide"
 #config_name = "ibm5150_16k"
 #config_name = "ibm5150_256k"
 #config_name = "ibm5160"
+config_name = "gts220"
 #config_name = "ibm5160_hdd"
 #config_name = "ibm_pcjr"
 #config_name = "tandy1000"
@@ -292,10 +293,10 @@ write_protect_default = false
 # You can specify VHD images to be automatically mounted into the specified
 # drives on startup.
 # ----------------------------------------------------------------------------
-[[emulator.media.vhd]]
-# VHD to mount into drive 0 (Typically C:)
-drive = 0
-# A default image formatted with DOS 3.30 is provided which
+#[[emulator.media.vhd]]
+## VHD to mount into drive 0 (Typically C:)
+#drive = 0
+## A default image formatted with DOS 3.30 is provided which
 # gives excellent compatibility with software of the IBM XT era. Only the
 # system has been transferred - you will need to copy over your own full DOS
 # installation if you want to use DOS utilities.

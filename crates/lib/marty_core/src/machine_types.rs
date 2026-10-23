@@ -50,6 +50,7 @@ pub enum MachineType {
     Tandy1000HX,
     CompaqPortable,
     CompaqDeskpro,
+    Gts220,
 }
 
 impl FromStr for MachineType {
@@ -68,6 +69,7 @@ impl FromStr for MachineType {
             "tandy1000sl" => Ok(MachineType::Tandy1000SL),
             "tandy1000hx" => Ok(MachineType::Tandy1000HX),
             "compaq_deskpro" => Ok(MachineType::CompaqDeskpro),
+            "gts220" => Ok(MachineType::Gts220),
             _ => Err("Bad value for model".to_string()),
         }
     }

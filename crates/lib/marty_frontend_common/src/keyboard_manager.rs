@@ -313,6 +313,7 @@ fn osd_keyboard_name(keyboard_type: KeyboardType) -> &'static str {
         KeyboardType::ModelM => "modelm",
         KeyboardType::Tandy1000 => "tandy1000",
         KeyboardType::Pcjr => "pcjr",
+        KeyboardType::Gts220 => "modelm",
     }
 }
 

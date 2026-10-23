@@ -1277,7 +1277,14 @@ impl BusInterface {
             }
             match serial_config.sc_type {
                 SerialControllerType::IbmAsync => {
-                    let serial = SerialPortController::new(out2_suppresses_int);
+                    let mut serial = SerialPortController::new(out2_suppresses_int);
+                    // GTS-220: per-port virtual modem attachment (COM1 carries
+                    // the R65C19 modem board link).
+                    for (i, port_cfg) in serial_config.port.iter().enumerate() {
+                        if let Some(modem_cfg) = &port_cfg.virtual_modem {
+                            serial.set_virtual_modem(i, modem_cfg.host.clone());
+                        }
+                    }
                     // Add Serial Controller ports to io_map
                     add_io_device!(self, serial, IoDeviceType::Serial);
                     self.serial = Some(serial);
@@ -1469,6 +1476,46 @@ impl BusInterface {
                     add_io_device!(self, vga, IoDeviceType::Video(video_id));
                     add_mmio_device!(self, vga, MmioDeviceType::Video(video_id));
                     VideoCardDispatch::Vga(Box::new(vga))
+                }
+                VideoType::Gts220 => {
+                    // GTS-220 font chip (KM23F4000, 512KB mask ROM), mapped
+                    // RE-verified: linear bus window 0x20000-0x9FFFF decodes
+                    // as chip = bus & 0x7FFFF:
+                    //   bus 0x20000-0x7FFFF -> chip 0x20000-0x7FFFF (glyphs, ROM)
+                    //   bus 0x80000-0x8FFFF -> chip 0x00000-0x0FFFF (RAM:
+                    //     graphics lib copy — writable, initialized from chip)
+                    //   bus 0x90000-0x9FFFF -> chip 0x10000-0x1FFFF (ROM)
+                    let font_path = card.font_rom.clone();
+                    if let Some(font_path) = font_path {
+                        let chip = std::fs::read(&font_path).map_err(|e| {
+                            anyhow::anyhow!("GTS-220 font ROM read failed ('{font_path}'): {e}")
+                        })?;
+                        if chip.len() != 0x80000 {
+                            return Err(anyhow::anyhow!(
+                                "GTS-220 font ROM must be 512KB, got {} bytes ('{font_path}')",
+                                chip.len()
+                            ));
+                        }
+                        self.copy_from(&chip[0x20000..0x80000], 0x20000, 0, true)
+                            .map_err(|_| anyhow::anyhow!("GTS-220 font ROM map failed @0x20000"))?;
+                        self.copy_from(&chip[0x00000..0x10000], 0x80000, 0, false)
+                            .map_err(|_| anyhow::anyhow!("GTS-220 font RAM map failed @0x80000"))?;
+                        self.copy_from(&chip[0x10000..0x20000], 0x90000, 0, true)
+                            .map_err(|_| anyhow::anyhow!("GTS-220 font ROM map failed @0x90000"))?;
+                    }
+                    // fs_writable comes from the machine config. The
+                    // firmware rewrites SETUP$$$.DAT (delete+recreate) when
+                    // the file is valid — with a read-only window the RAM
+                    // chain table desyncs and the boot stalls in the
+                    // mini-DOS chain walk, so setups that ship a valid
+                    // SETUP$$$.DAT must enable writes.
+                    let card = crate::devices::gts220::Gts220Card::new(
+                        card.rom_path.as_deref(),
+                        card.fs_writable,
+                    );
+                    add_io_device!(self, card, IoDeviceType::Video(video_id));
+                    add_mmio_device!(self, card, MmioDeviceType::Video(video_id));
+                    VideoCardDispatch::Gts220(Box::new(card))
                 }
                 #[allow(unreachable_patterns)]
                 _ => {
@@ -1799,6 +1846,9 @@ impl BusInterface {
                 VideoCardDispatch::Vga(vga) => {
                     vga.run(DeviceRunTimeUnit::Microseconds(us), &mut self.pic1, None);
                 }
+                VideoCardDispatch::Gts220(card) => {
+                    card.run(DeviceRunTimeUnit::Microseconds(us), &mut self.pic1, None);
+                }
                 VideoCardDispatch::None => {}
             }
         }
@@ -2059,6 +2109,7 @@ impl BusInterface {
                 VideoCardDispatch::Ega(ega) => Some(Box::new(&**ega as &dyn VideoCard)),
                 #[cfg(feature = "vga")]
                 VideoCardDispatch::Vga(vga) => Some(Box::new(&**vga as &dyn VideoCard)),
+                VideoCardDispatch::Gts220(c) => Some(Box::new(&**c as &dyn VideoCard)),
                 VideoCardDispatch::None => None,
             }
         }
@@ -2077,6 +2128,7 @@ impl BusInterface {
                 VideoCardDispatch::Ega(ega) => Some(Box::new(&mut **ega as &mut dyn VideoCard)),
                 #[cfg(feature = "vga")]
                 VideoCardDispatch::Vga(vga) => Some(Box::new(&mut **vga as &mut dyn VideoCard)),
+                VideoCardDispatch::Gts220(c) => Some(Box::new(&mut **c as &mut dyn VideoCard)),
                 VideoCardDispatch::None => None,
             }
         }

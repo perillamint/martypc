@@ -37,7 +37,6 @@
 */
 
 use std::collections::{BTreeMap, VecDeque};
-
 use crate::{
     bus::{BusInterface, DeviceRunTimeUnit, IoDevice},
     cpu_common::LogicAnalyzer,
@@ -51,6 +50,80 @@ use serde_derive::Deserialize;
 use std::io::Read;
 #[cfg(feature = "serial")]
 use web_time::Duration;
+
+// ---------------------------------------------------------------------------
+// GTS-220 modem data trace (diagnostics for firmware/protocol RE).
+//
+// Enabled via environment variables, read once:
+//   GTS220_STRACE=1       log modem <-> DTE data chunks to 'gts220_serial.log'
+//                         (working directory)
+//   GTS220_STRACE=<path>  same, but to a custom log path
+//
+// Format (one line per pump-chunk, timestamps in wall-clock ms since trace
+// start):
+//   <ms> TX 41 54 44 54 .. |ATDT..|   DTE -> modem (AT commands, key data)
+//   <ms> RX 0d 0a ... |..CONNECT..|   modem -> DTE (result codes, host data)
+// Control bytes are visible in the hex dump — this is where host-side
+// screen-management codes (scroll/clear) would show up.
+// ---------------------------------------------------------------------------
+mod gts_serial_trace {
+    use std::fs::File;
+    use std::io::{BufWriter, Write};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+
+    struct SerialTrace {
+        writer: Option<BufWriter<File>>,
+        start: Instant,
+    }
+
+    static TRACE: OnceLock<Mutex<SerialTrace>> = OnceLock::new();
+
+    fn trace() -> &'static Mutex<SerialTrace> {
+        TRACE.get_or_init(|| {
+            let path = match std::env::var("GTS220_STRACE") {
+                Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => {
+                    Some(std::path::PathBuf::from("gts220_serial.log"))
+                }
+                Ok(v) if !v.is_empty() => Some(std::path::PathBuf::from(&v)),
+                _ => None,
+            };
+            let writer = path.and_then(|p| match File::create(&p) {
+                Ok(f) => {
+                    log::info!("GTS220: serial trace enabled -> {}", p.display());
+                    Some(BufWriter::with_capacity(1 << 14, f))
+                }
+                Err(e) => {
+                    log::warn!("GTS220: serial trace create failed ({}): {}", p.display(), e);
+                    None
+                }
+            });
+            Mutex::new(SerialTrace {
+                writer,
+                start: Instant::now(),
+            })
+        })
+    }
+
+    pub fn log(direction: &str, data: &[u8]) {
+        let Ok(mut t) = trace().lock() else { return };
+        let ms = t.start.elapsed().as_millis();
+        let Some(w) = t.writer.as_mut() else { return };
+        let mut hex = String::with_capacity(data.len() * 3);
+        for b in data {
+            hex.push_str(&format!("{b:02x} "));
+        }
+        // Printable rendering: control bytes as '.', high bytes (EUC-KR
+        // halves) kept in the hex dump only.
+        let ascii: String = data
+            .iter()
+            .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+            .collect();
+        let _ = writeln!(w, "{:>8} {} {} |{}|", ms, direction, hex, ascii);
+        // Serial data is low-rate; flush per chunk so the tail stays readable.
+        let _ = w.flush();
+    }
+}
 /*  1.8Mhz Oscillator.
     Divided by 16, then again by programmable Divisor to select baud rate.
     The 8250 has a maximum baud of 9600.
@@ -332,6 +405,12 @@ pub struct SerialPort {
     bridge_port: Option<Box<dyn serialport::SerialPort>>,
     #[cfg(feature = "serial")]
     bridge_buf: Vec<u8>,
+
+    /// Virtual Hayes modem (GTS-220 R65C19 board stand-in). When present,
+    /// DTE TX bytes are tapped into the modem's command parser instead of
+    /// (or in addition to) a host bridge, and modem responses are queued
+    /// into the RX path at line rate.
+    virtual_modem: Option<crate::devices::gts_modem::AtModem>,
 }
 
 impl Default for SerialPort {
@@ -345,7 +424,7 @@ impl Default for SerialPort {
             parity_enable: false,
             divisor_latch_access: false,
             divisor: 12, // 9600 baud
-            line_status_reg: STATUS_TRANSMIT_EMPTY,
+            line_status_reg: STATUS_TRANSMIT_EMPTY | STATUS_TRANSMIT_SHIFT_EMPTY,
             interrupts_active: 0,
             interrupt_enable_reg: 0,
             intr_action: IntrAction::None,
@@ -376,6 +455,8 @@ impl Default for SerialPort {
             bridge_port: None,
             #[cfg(feature = "serial")]
             bridge_buf: vec![0; 1000],
+
+            virtual_modem: None,
         }
     }
 }
@@ -391,12 +472,16 @@ impl SerialPort {
     }
 
     pub fn reset(&mut self) {
+        // A virtual modem survives a machine reset (it is an external
+        // device, not part of the 8088's state).
+        let virtual_modem = self.virtual_modem.take();
         *self = Self {
             name: self.name.clone(),
             irq: self.irq,
             out2_suppresses_int: self.out2_suppresses_int,
             ..Default::default()
-        }
+        };
+        self.virtual_modem = virtual_modem;
     }
 
     #[cfg(feature = "serial")]
@@ -793,6 +878,32 @@ impl SerialPort {
         }
     }
 
+    /// Set the DCD (bit 7) and RI (bit 6) modem status inputs from a virtual
+    /// peer. Delta bits (DRLSD/TERI) are raised when the lines change, and a
+    /// modem status interrupt is requested, matching real 8250 behavior.
+    fn set_modem_lines(&mut self, dcd: bool, ri: bool) {
+        let old_dcd = self.modem_status_reg & MODEM_STATUS_RLSD != 0;
+        let old_ri = self.modem_status_reg & MODEM_STATUS_RI != 0;
+
+        if dcd != old_dcd {
+            self.modem_status_reg ^= MODEM_STATUS_RLSD;
+            self.modem_status_reg |= MODEM_STATUS_DRLSD;
+        }
+        if ri != old_ri {
+            self.modem_status_reg ^= MODEM_STATUS_RI;
+            self.modem_status_reg |= MODEM_STATUS_TERI;
+        }
+        if dcd != old_dcd || ri != old_ri {
+            self.raise_interrupt_type(INTERRUPT_MODEM_STATUS);
+        }
+    }
+
+    /// Assert the carrier-detect line (data call established/lost).
+    pub fn virtual_modem_set_carrier(&mut self, carrier: bool) {
+        let ri = self.modem_status_reg & MODEM_STATUS_RI != 0;
+        self.set_modem_lines(carrier, ri);
+    }
+
     /// Handle an overrun of the RX buffer.
     fn overrun(&mut self) {
         // Previous byte was never read :(
@@ -1119,6 +1230,39 @@ impl SerialPortController {
         self.port[port].bridge_port(host_port_name, host_port_id)
     }
 
+    /// Attach a virtual Hayes modem (GTS-220 R65C19 stand-in) to a port.
+    /// `host` is the optional TCP endpoint for data calls ("host:port");
+    /// without it, dials report NO CARRIER after a timeout.
+    pub fn set_virtual_modem(&mut self, port: usize, host: Option<String>) {
+        if port < self.port.len() {
+            log::info!(
+                "COM{}: attaching virtual modem (endpoint: {})",
+                port + 1,
+                host.as_deref().unwrap_or("<none>")
+            );
+            self.port[port].virtual_modem = Some(crate::devices::gts_modem::AtModem::new(host));
+        }
+    }
+
+    /// Force the DCD (carrier detect) line on a port, bypassing any virtual
+    /// modem state. Debug/test hook: asserting DCD before boot makes the
+    /// GTS-220 firmware enter its online (state 2) screen directly.
+    pub fn force_carrier(&mut self, port: usize, on: bool) {
+        if port < self.port.len() {
+            self.port[port].virtual_modem_set_carrier(on);
+        }
+    }
+
+    /// True while the virtual modem on this port is dialing.
+    pub fn modem_is_dialing(&mut self, port: usize) -> bool {
+        if port < self.port.len() {
+            if let Some(m) = &self.port[port].virtual_modem {
+                return m.is_dialing();
+            }
+        }
+        false
+    }
+
     /// Run the serial ports for the specified number of microseconds
     pub fn run(&mut self, pic: &mut pic::Pic, us: f64) {
         for port in self.port.iter_mut() {
@@ -1153,9 +1297,13 @@ impl SerialPortController {
             while port.tx_timer > port.us_per_byte {
                 // Is there a byte waiting to be sent in the tx holding register?
                 if !port.tx_holding_empty {
-                    // If we have bridged this serial port, send the byte to the tx queue
+                    // If we have bridged this serial port (or a virtual modem
+                    // is attached), send the byte to the tx queue.
                     #[cfg(feature = "serial")]
-                    if let Some(_) = &port.bridge_port {
+                    let bridged = port.bridge_port.is_some();
+                    #[cfg(not(feature = "serial"))]
+                    let bridged = false;
+                    if bridged || port.virtual_modem.is_some() {
                         //log::trace!("{}: Sending byte: {:02X}", port.name, port.tx_holding_reg);
                         port.tx_queue.push_back(port.tx_holding_reg);
                     }
@@ -1259,6 +1407,64 @@ impl SerialPortController {
                 }
             }
         }
+
+        // Virtual modem pump: feed tapped DTE TX into the modem, drive its
+        // timers/network link, and queue its output into the RX path.
+        for port in &mut self.port {
+            if port.virtual_modem.is_some() {
+                // Take the modem out so `port` can be borrowed freely below.
+                let mut modem = port.virtual_modem.take().unwrap();
+
+                // Drain DTE TX (paced at line rate by run()) into the modem.
+                let tx: Vec<u8> = port.tx_queue.drain(..).collect();
+                if !tx.is_empty() {
+                    log::trace!("{}: virtual modem <- DTE: {}", port.name, String::from_utf8_lossy(&tx));
+                    gts_serial_trace::log("TX", &tx);
+                    for byte in tx {
+                        modem.dte_tx(byte);
+                    }
+                }
+
+                // Drive modem timers + network link.
+                modem.pump();
+
+                // DTR drop monitoring (&D1 semantics: dropping DTR hangs up).
+                let new_dtr = port.modem_control_reg & MODEM_CONTROL_DTR != 0;
+                if new_dtr != port.last_dtr {
+                    if !new_dtr {
+                        log::info!("{}: virtual modem DTR drop -> hangup", port.name);
+                        modem.dtr_drop();
+                    }
+                    port.last_dtr = new_dtr;
+                }
+
+                // Queue modem output for paced delivery into the UART RX.
+                let to_dte = modem.take_to_dte();
+                if !to_dte.is_empty() {
+                    log::trace!(
+                        "{}: virtual modem -> DTE: {}",
+                        port.name,
+                        String::from_utf8_lossy(&to_dte)
+                    );
+                    gts_serial_trace::log("RX", &to_dte);
+                    if port.rx_queue.is_empty() {
+                        port.rx_timer = 0.0;
+                    }
+                    port.rx_queue.extend(to_dte);
+                }
+
+                // Reflect DCD/RI into the MSR (with delta bits + interrupt).
+                let (dcd, ri) = (modem.dcd(), modem.ri());
+                port.set_modem_lines(dcd, ri);
+
+                // Surface events for higher layers (logging/UI).
+                for event in modem.take_events() {
+                    log::info!("{}: virtual modem event: {event:?}", port.name);
+                }
+
+                port.virtual_modem = Some(modem);
+            }
+        }
     }
 }
 
@@ -1337,5 +1543,355 @@ mod tests {
 
         serial.run(&mut pic, 2.0);
         assert!(serial.port[0].rx_queue.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Virtual modem (GTS-220) — full UART path tests
+    // -----------------------------------------------------------------------
+
+    use crate::bus::{DeviceRunTimeUnit, IoDevice};
+
+    /// Drive the controller in 1ms steps, draining the COM1 RBR after each
+    /// step. The emulated UART has a single-byte RX holding register (no
+    /// FIFO), so bytes must be collected as they are received or they
+    /// overrun — same as real hardware polled slower than the line rate.
+    /// Returns everything read.
+    fn drive_and_drain(serial: &mut SerialPortController, pic: &mut Pic, iters: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for _ in 0..iters {
+            serial.run(pic, 1_000.0);
+            serial.update();
+            loop {
+                let lsr = serial.read_u8(0x3FD, DeviceRunTimeUnit::Microseconds(0.0));
+                if lsr & 0x01 == 0 {
+                    break;
+                }
+                out.push(serial.read_u8(0x3F8, DeviceRunTimeUnit::Microseconds(0.0)));
+            }
+        }
+        out
+    }
+
+    /// Write bytes to the COM1 THR the way the firmware does: poll LSR THRE
+    /// between writes (serial_send_byte at 0xEF300 loops on it).
+    fn send_dte(serial: &mut SerialPortController, pic: &mut Pic, bytes: &[u8]) {
+        for b in bytes {
+            for _ in 0..100 {
+                serial.run(pic, 1_000.0);
+                serial.update();
+                let lsr = serial.read_u8(0x3FD, DeviceRunTimeUnit::Microseconds(0.0));
+                if lsr & 0x20 != 0 {
+                    break;
+                }
+            }
+            serial.write_u8(0x3F8, *b, None, DeviceRunTimeUnit::Microseconds(0.0), None);
+        }
+    }
+
+    fn set_baud(serial: &mut SerialPortController) {
+        // 9600 8N1 (divisor 12 is the minimum clamp).
+        serial.write_u8(0x3FB, 0x80, None, DeviceRunTimeUnit::Microseconds(0.0), None); // DLAB
+        serial.write_u8(0x3F8, 12, None, DeviceRunTimeUnit::Microseconds(0.0), None);
+        serial.write_u8(0x3F9, 0, None, DeviceRunTimeUnit::Microseconds(0.0), None);
+        serial.write_u8(0x3FB, 0x03, None, DeviceRunTimeUnit::Microseconds(0.0), None);
+    }
+
+    #[test]
+    fn virtual_modem_at_roundtrip_through_uart() {
+        let mut serial = SerialPortController::new(true);
+        let mut pic = Pic::new();
+        serial.set_virtual_modem(0, None);
+        set_baud(&mut serial);
+
+        // "AT\r" — echoed, then OK.
+        send_dte(&mut serial, &mut pic, b"AT\r");
+
+        let resp_bytes = drive_and_drain(&mut serial, &mut pic, 200);
+        let resp = String::from_utf8(resp_bytes).unwrap();
+        assert!(resp.contains("AT\r"), "echo missing: {resp:?}");
+        assert!(resp.ends_with("\r\nOK\r\n"), "final result missing: {resp:?}");
+    }
+
+    #[test]
+    fn virtual_modem_dial_no_carrier_via_uart() {
+        let mut serial = SerialPortController::new(true);
+        let mut pic = Pic::new();
+        serial.set_virtual_modem(0, None);
+        set_baud(&mut serial);
+
+        // The exact dial string the GTS-220 firmware sends (minus dial tone
+        // detection per X3). No endpoint configured -> NO CARRIER after 5s.
+        send_dte(&mut serial, &mut pic, b"ATX3DT1,5,9,0P28\r");
+
+        // Drive until the result arrives; the 5s no-net timeout is
+        // wall-clock, so sleep between drives.
+        let mut resp = String::new();
+        for _ in 0..40 {
+            let chunk = drive_and_drain(&mut serial, &mut pic, 20);
+            resp.push_str(&String::from_utf8_lossy(&chunk));
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            if resp.contains("NO CARRIER") {
+                break;
+            }
+        }
+        assert!(resp.contains("NO CARRIER"), "no result: {resp:?}");
+        // DCD must be clear (call failed).
+        let msr = serial.read_u8(0x3FE, DeviceRunTimeUnit::Microseconds(0.0));
+        assert_eq!(msr & 0x80, 0, "DCD must not assert on failed dial");
+    }
+
+    #[cfg(feature = "serial")]
+    #[test]
+    fn virtual_modem_tcp_dial_connects_and_carries_data() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let mut serial = SerialPortController::new(true);
+        let mut pic = Pic::new();
+        serial.set_virtual_modem(0, Some(addr.to_string()));
+        set_baud(&mut serial);
+
+        send_dte(&mut serial, &mut pic, b"ATX3DT1234\r");
+
+        // Accept the modem's connection attempt.
+        listener.set_nonblocking(true).unwrap();
+        let mut peer = None;
+        let mut resp = String::new();
+        for _ in 0..2000 {
+            let chunk = drive_and_drain(&mut serial, &mut pic, 2);
+            resp.push_str(&String::from_utf8_lossy(&chunk));
+            if peer.is_none() {
+                if let Ok((stream, _)) = listener.accept() {
+                    stream.set_nonblocking(true).unwrap();
+                    peer = Some(stream);
+                }
+            }
+            if resp.contains("CONNECT 2400") {
+                break;
+            }
+        }
+        assert!(resp.contains("CONNECT 2400"), "no connect: {resp:?}");
+
+        // DCD asserts with the connection.
+        let msr = serial.read_u8(0x3FE, DeviceRunTimeUnit::Microseconds(0.0));
+        assert_ne!(msr & 0x80, 0, "DCD must assert on connect");
+
+        let mut peer = peer.expect("peer must have connected");
+
+        // Guest -> network: write through THR, expect on the socket.
+        send_dte(&mut serial, &mut pic, b"PING");
+        let mut net_buf = [0u8; 16];
+        let mut got_net = Vec::new();
+        for _ in 0..2000 {
+            drive_and_drain(&mut serial, &mut pic, 2);
+            if let Ok(n) = peer.read(&mut net_buf) {
+                got_net.extend_from_slice(&net_buf[..n]);
+            }
+            if got_net.windows(4).any(|w| w == b"PING") {
+                break;
+            }
+        }
+        assert!(
+            got_net.windows(4).any(|w| w == b"PING"),
+            "data did not reach the network: {got_net:?}"
+        );
+
+        // Network -> guest: write on the socket, expect at the RBR.
+        peer.write_all(b"PONG").unwrap();
+        let mut got_guest = Vec::new();
+        for _ in 0..2000 {
+            got_guest.extend_from_slice(&drive_and_drain(&mut serial, &mut pic, 2));
+            if got_guest.windows(4).any(|w| w == b"PONG") {
+                break;
+            }
+        }
+        assert!(
+            got_guest.windows(4).any(|w| w == b"PONG"),
+            "network data did not reach the DTE: {got_guest:?}"
+        );
+
+        // Escape to command mode with '+++' (1s guard simplified), then ATH.
+        send_dte(&mut serial, &mut pic, b"+++");
+        let mut resp = String::new();
+        for _ in 0..2000 {
+            let chunk = drive_and_drain(&mut serial, &mut pic, 2);
+            resp.push_str(&String::from_utf8_lossy(&chunk));
+            if resp.contains("OK") {
+                break;
+            }
+        }
+        assert!(resp.contains("OK"), "+++ escape not acknowledged: {resp:?}");
+
+        send_dte(&mut serial, &mut pic, b"ATH\r");
+        let mut resp = String::new();
+        for _ in 0..2000 {
+            let chunk = drive_and_drain(&mut serial, &mut pic, 2);
+            resp.push_str(&String::from_utf8_lossy(&chunk));
+            if resp.contains("OK") {
+                break;
+            }
+        }
+        assert!(resp.contains("OK"), "ATH not acknowledged: {resp:?}");
+        let msr = serial.read_u8(0x3FE, DeviceRunTimeUnit::Microseconds(0.0));
+        assert_eq!(msr & 0x80, 0, "DCD must clear after hangup");
+    }
+
+    /// &D1 semantics: the DTE clearing MCR DTR terminates the call.
+    #[cfg(feature = "serial")]
+    #[test]
+    fn virtual_modem_dtr_drop_hangs_up() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let mut serial = SerialPortController::new(true);
+        let mut pic = Pic::new();
+        serial.set_virtual_modem(0, Some(addr.to_string()));
+        set_baud(&mut serial);
+
+        // Assert DTR as the firmware does (MCR=0x0B: DTR|RTS|OUT2).
+        serial.write_u8(0x3FC, 0x0B, None, DeviceRunTimeUnit::Microseconds(0.0), None);
+
+        send_dte(&mut serial, &mut pic, b"ATDT1234\r");
+        listener.set_nonblocking(true).unwrap();
+        let mut resp = String::new();
+        let mut peer = None;
+        for _ in 0..2000 {
+            let chunk = drive_and_drain(&mut serial, &mut pic, 2);
+            resp.push_str(&String::from_utf8_lossy(&chunk));
+            if peer.is_none() {
+                if let Ok((stream, _)) = listener.accept() {
+                    stream.set_nonblocking(true).unwrap();
+                    peer = Some(stream);
+                }
+            }
+            if resp.contains("CONNECT 2400") {
+                break;
+            }
+        }
+        assert!(resp.contains("CONNECT 2400"), "no connect: {resp:?}");
+        let _peer = peer;
+
+        // Drop DTR -> NO CARRIER + DCD clear.
+        serial.write_u8(0x3FC, 0x0A, None, DeviceRunTimeUnit::Microseconds(0.0), None);
+        let mut resp = String::new();
+        for _ in 0..2000 {
+            let chunk = drive_and_drain(&mut serial, &mut pic, 2);
+            resp.push_str(&String::from_utf8_lossy(&chunk));
+            if resp.contains("NO CARRIER") {
+                break;
+            }
+        }
+        assert!(resp.contains("NO CARRIER"), "DTR drop did not hang up: {resp:?}");
+        let msr = serial.read_u8(0x3FE, DeviceRunTimeUnit::Microseconds(0.0));
+        assert_eq!(msr & 0x80, 0, "DCD must clear after DTR drop");
+    }
+
+    /// Dial-string addressing: `ATDT<ip>:<port>` connects to that endpoint
+    /// with NO configured host — the phone book (HITEL*.TEL) can carry the
+    /// IP as the "phone number".
+    #[cfg(feature = "serial")]
+    #[test]
+    fn virtual_modem_dial_ip_from_dial_string() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let mut serial = SerialPortController::new(true);
+        let mut pic = Pic::new();
+        // No configured endpoint — the dial string carries the target.
+        serial.set_virtual_modem(0, None);
+        set_baud(&mut serial);
+
+        send_dte(&mut serial, &mut pic, format!("ATDT{addr}\r").as_bytes());
+        listener.set_nonblocking(true).unwrap();
+        let mut resp = String::new();
+        let mut peer = None;
+        for _ in 0..2000 {
+            let chunk = drive_and_drain(&mut serial, &mut pic, 2);
+            resp.push_str(&String::from_utf8_lossy(&chunk));
+            if peer.is_none() {
+                if let Ok((stream, _)) = listener.accept() {
+                    stream.set_nonblocking(true).unwrap();
+                    peer = Some(stream);
+                }
+            }
+            if resp.contains("CONNECT 2400") {
+                break;
+            }
+        }
+        assert!(resp.contains("CONNECT 2400"), "IP dial did not connect: {resp:?}");
+        let msr = serial.read_u8(0x3FE, DeviceRunTimeUnit::Microseconds(0.0));
+        assert_ne!(msr & 0x80, 0, "DCD must assert on IP-dial connect");
+
+        // Data round-trip on the dialed connection.
+        let mut peer = peer.expect("peer must have connected");
+        send_dte(&mut serial, &mut pic, b"PING");
+        let mut net_buf = [0u8; 16];
+        let mut got = Vec::new();
+        for _ in 0..2000 {
+            drive_and_drain(&mut serial, &mut pic, 2);
+            if let Ok(n) = peer.read(&mut net_buf) {
+                got.extend_from_slice(&net_buf[..n]);
+            }
+            if got.windows(4).any(|w| w == b"PING") {
+                break;
+            }
+        }
+        assert!(got.windows(4).any(|w| w == b"PING"), "no data over IP dial: {got:?}");
+
+        // Clean hangup.
+        send_dte(&mut serial, &mut pic, b"+++");
+        let mut resp = String::new();
+        for _ in 0..2000 {
+            let chunk = drive_and_drain(&mut serial, &mut pic, 2);
+            resp.push_str(&String::from_utf8_lossy(&chunk));
+            if resp.contains("OK") {
+                break;
+            }
+        }
+        send_dte(&mut serial, &mut pic, b"ATH\r");
+        for _ in 0..2000 {
+            let chunk = drive_and_drain(&mut serial, &mut pic, 2);
+            resp.push_str(&String::from_utf8_lossy(&chunk));
+            if resp.matches("OK").count() >= 2 {
+                break;
+            }
+        }
+        let msr = serial.read_u8(0x3FE, DeviceRunTimeUnit::Microseconds(0.0));
+        assert_eq!(msr & 0x80, 0, "DCD must clear after IP-dial hangup");
+    }
+
+    /// A host dial to a dead port fails with NO CARRIER (connect refused).
+    #[cfg(feature = "serial")]
+    #[test]
+    fn virtual_modem_dial_ip_dead_port_no_carrier() {
+        // Bind then drop the listener: the port is closed.
+        let addr = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+
+        let mut serial = SerialPortController::new(true);
+        let mut pic = Pic::new();
+        serial.set_virtual_modem(0, None);
+        set_baud(&mut serial);
+
+        send_dte(&mut serial, &mut pic, format!("ATDT{addr}\r").as_bytes());
+        let mut resp = String::new();
+        for _ in 0..4000 {
+            let chunk = drive_and_drain(&mut serial, &mut pic, 2);
+            resp.push_str(&String::from_utf8_lossy(&chunk));
+            if resp.contains("NO CARRIER") {
+                break;
+            }
+        }
+        assert!(resp.contains("NO CARRIER"), "dead port must yield NO CARRIER: {resp:?}");
     }
 }
